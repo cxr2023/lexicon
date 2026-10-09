@@ -1,0 +1,151 @@
+import { readFile } from 'node:fs/promises';
+import { PGlite } from '@electric-sql/pglite';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { validateBackup } from '../../src/lib/backup';
+import { createEntry, schedule } from '../../src/lib/domain';
+import type { ReviewInput, Snapshot, StudyBatch } from '../../src/types';
+
+let db: PGlite;
+const uid = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const otherUid = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const sql = (statement: string, args?: unknown[]) => db.query(statement, args);
+async function rpc<T>(name: string, args: unknown[] = []): Promise<T> {
+  const placeholders = args.map((_, i) => `$${i + 1}${typeof args[i] === 'object' ? '::jsonb' : ''}`);
+  const result = await sql(`select public.${name}(${placeholders.join(',')}) as result`, args.map(value => typeof value === 'object' ? JSON.stringify(value) : value));
+  return (result.rows[0] as { result: T }).result;
+}
+const load = async () => validateBackup({ version: 1, exported_at: new Date().toISOString(), data: await rpc<Snapshot>('load_snapshot') }).data;
+const makeEntry = (i: number) => createEntry({ term: `word ${i}`, ipa_us: '/wɝd/', definition_en: `An item ${i}.`, created_at: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString() });
+async function inputFor(entryId: string) {
+  const snapshot = await load();
+  const card = snapshot.cards.find(card => card.entry_id === entryId && card.kind === 'recognition')!;
+  const now = new Date();
+  const input: ReviewInput = { operation_id: crypto.randomUUID(), card_id: card.id, expected_revision: card.revision,
+    rating: 3, reviewed_at: now.toISOString(), next_state: schedule(card, 3, snapshot.settings, now) };
+  return input;
+}
+beforeAll(async () => {
+  db = new PGlite();
+  await db.exec(`
+    create role anon;
+    create role authenticated;
+    create schema auth;
+    create table auth.users(id uuid primary key);
+    insert into auth.users values ('${uid}'), ('${otherUid}');
+    create function auth.uid() returns uuid language sql stable as $$ select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid $$;
+    grant usage on schema auth to anon, authenticated;
+    grant execute on function auth.uid() to anon, authenticated;
+  `);
+  const migration = await readFile(new URL('../migrations/202610090001_lexicon.sql', import.meta.url), 'utf8');
+  await db.exec(migration);
+  await sql(`select set_config('request.jwt.claim.sub', $1, false)`, [uid]);
+  await db.exec('set role authenticated');
+}, 60_000);
+afterAll(async () => { await db?.close(); });
+
+describe('Supabase SQL RPC contracts on PostgreSQL', () => {
+  it('creates a valid private snapshot, blocks direct updates and hides other users', async () => {
+    const snapshot = await rpc<Snapshot>('load_snapshot', ['America/New_York']);
+    expect(snapshot.settings.timezone).toBe('America/New_York');
+    expect(snapshot.entries).toEqual([]);
+    await expect(db.exec(`update public.lexicon_workspaces set data = '{}'::jsonb`)).rejects.toThrow('permission denied');
+    await expect(rpc('lexicon_action', ['load'])).rejects.toThrow('permission denied');
+    await sql(`select set_config('request.jwt.claim.sub', $1, false)`, [otherUid]);
+    expect((await sql('select * from public.lexicon_workspaces')).rows).toHaveLength(0);
+    expect((await load()).entries).toHaveLength(0);
+    await sql(`select set_config('request.jwt.claim.sub', $1, false)`, [uid]);
+  });
+
+  it('excludes drafts and uncertain entries, returns resumed batches, allows >10 per day', async () => {
+    await rpc('save_entries', [Array.from({ length: 12 }, (_, i) => makeEntry(i))]);
+    await rpc('save_entries', [[{ ...makeEntry(20), ipa_us: '' }]]);
+    await rpc('save_entries', [[{ ...makeEntry(21), notes: '待确认' }]]);
+    const snapshot = await load();
+    expect(snapshot.cards).toHaveLength(12);
+    const first = await rpc<StudyBatch>('start_next_batch');
+    expect(first.entry_ids).toHaveLength(10);
+    expect((await rpc<StudyBatch>('start_next_batch')).id).toBe(first.id);
+    for (const id of first.entry_ids) await rpc('submit_review', [await inputFor(id)]);
+    const second = await rpc<StudyBatch>('start_next_batch');
+    expect(second.entry_ids).toHaveLength(2);
+    expect(second.entry_ids.every(id => !first.entry_ids.includes(id))).toBe(true);
+  });
+
+  it('deduplicates an exact submission, rejects reused ids and optimistic races', async () => {
+    const batch = await rpc<StudyBatch>('start_next_batch');
+    const input = await inputFor(batch.entry_ids[0]);
+    await rpc('submit_review', [input]);
+    await rpc('submit_review', [input]);
+    expect((await load()).reviews.filter(review => review.id === input.operation_id)).toHaveLength(1);
+    await expect(rpc('submit_review', [{ ...input, rating: 1 }])).rejects.toThrow('编号');
+    await expect(rpc('submit_review', [{ ...input, operation_id: crypto.randomUUID() }])).rejects.toThrow('进度');
+  });
+
+  it('adds optional cards without resetting progress, buries siblings, and undoes atomically', async () => {
+    let data = await load();
+    const target = data.entries[0];
+    const recognition = data.cards.find(card => card.entry_id === target.id)!;
+    await rpc('save_entries', [[{ ...target, meaning_zh: '词', example: 'A {{word}} here.' }]]);
+    data = await load();
+    expect(data.cards.find(card => card.id === recognition.id)).toEqual(recognition);
+    await rpc('save_settings', [{ ...data.settings, production_enabled: true, cloze_enabled: true }]);
+    expect((await load()).cards.filter(card => card.entry_id === target.id && card.kind !== 'recognition').every(card => !!card.bury_until)).toBe(true);
+    const input = await inputFor(target.id);
+    await rpc('submit_review', [input]);
+    data = await load();
+    expect(data.cards.filter(card => card.entry_id === target.id && card.kind !== 'recognition').every(card => !!card.bury_until)).toBe(true);
+    await rpc('undo_review', [input.operation_id]);
+    data = await load();
+    expect(data.cards.find(card => card.id === recognition.id)?.state).toEqual(recognition.state);
+    expect(data.reviews.find(event => event.id === input.operation_id)?.undone).toBe(true);
+  });
+
+  it('permanently cascades deletion and rejects stale writes and submissions', async () => {
+    const data = await load();
+    const entry = data.entries[0];
+    const stale = await inputFor(entry.id);
+    await rpc('delete_entry', [entry.id, entry.revision]);
+    const current = await load();
+    expect(current.entries.some(item => item.id === entry.id)).toBe(false);
+    expect(current.cards.some(item => item.entry_id === entry.id)).toBe(false);
+    expect(current.reviews.some(item => item.entry_id === entry.id)).toBe(false);
+    expect(current.batches.some(item => item.entry_ids.includes(entry.id) || item.completed_ids.includes(entry.id))).toBe(false);
+    await expect(rpc('save_entries', [[entry]])).rejects.toThrow('删除');
+    await expect(rpc('submit_review', [stale])).rejects.toThrow('删除');
+  });
+
+  it('validates restore shape and invalidates every pre-restore card version', async () => {
+    const data = await load();
+    const stale = await inputFor(data.entries[0].id);
+    await expect(rpc('restore_backup', [{ version: 1, exported_at: new Date().toISOString(), data: { ...data, entries: [] } }])).rejects.toThrow('引用');
+    expect(await load()).toEqual(data);
+    await rpc('restore_backup', [{ version: 1, exported_at: new Date().toISOString(), data }]);
+    const restored = await load();
+    expect(restored.cards[0].revision).toBeGreaterThan(data.cards[0].revision);
+    await expect(rpc('submit_review', [stale])).rejects.toThrow('进度');
+  });
+
+  it('rejects malformed server-side backup data without committing partial changes', async () => {
+    const data = await load();
+    const malformed = structuredClone(data);
+    delete (malformed.cards[0].state as unknown as Record<string, unknown>).due;
+    await expect(rpc('restore_backup', [{ version: 1, exported_at: new Date().toISOString(), data: malformed }])).rejects.toThrow('卡片');
+    await expect(rpc('restore_backup', [{ version: 1, exported_at: new Date().toISOString(), data: { ...data, unexpected: true } }])).rejects.toThrow('备份');
+    expect(await load()).toEqual(data);
+    const changed = { ...data.entries[0], notes: 'Updated on another device' };
+    await rpc('save_entries', [[changed]]);
+    await expect(rpc('save_entries', [[makeEntry(30), changed]])).rejects.toThrow('修改');
+    expect((await load()).entries).toHaveLength(data.entries.length);
+    await expect(rpc('delete_entry', [changed.id, changed.revision])).rejects.toThrow('更新');
+    await expect(sql('select public.delete_entry($1, $2)', [changed.id, null])).rejects.toThrow('版本');
+  });
+
+  it('requires a signed-in user for every RPC', async () => {
+    await sql(`select set_config('request.jwt.claim.sub', '', false)`);
+    await expect(load()).rejects.toThrow('请先登录');
+    await db.exec('set role anon');
+    await expect(load()).rejects.toThrow('permission denied');
+    await db.exec('set role authenticated');
+    await sql(`select set_config('request.jwt.claim.sub', $1, false)`, [uid]);
+  });
+});
