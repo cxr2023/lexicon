@@ -192,7 +192,7 @@ begin
       select value into existing from jsonb_array_elements(d->'entries') where lower(value->>'id') = lower(e->>'id');
       if existing is not null and existing->>'id' <> e->>'id' then raise exception '词条 ID 的大小写与已有记录不一致。'; end if;
       if (existing is null and (e->>'revision')::numeric <> 0) or (existing is not null and existing->'revision' <> e->'revision') then
-        raise exception '词条已修改或删除，请刷新后重试。' using errcode = '40001';
+        raise exception '词条已修改或删除，请刷新后重试。' using errcode = 'PT409';
       end if;
       e := e || jsonb_build_object('revision',(e->>'revision')::numeric + 1,'updated_at',public.lexicon_now(),'created_at',coalesce(existing->>'created_at',e->>'created_at'));
       perform public.lexicon_validate_entry(e);
@@ -229,7 +229,7 @@ begin
     select value into c from jsonb_array_elements(d->'cards') where value->>'id' = incoming->>'card_id';
     if c is null then raise exception '词条已被删除，请刷新学习队列。'; end if;
     if (c->>'revision')::numeric >= 1000000000 then raise exception '卡片版本超出支持范围。'; end if;
-    if c->'revision' <> incoming->'expected_revision' then raise exception '学习进度已在其他页面更新，请刷新后重试。' using errcode = '40001'; end if;
+    if c->'revision' <> incoming->'expected_revision' then raise exception '学习进度已在其他页面更新，请刷新后重试。' using errcode = 'PT409'; end if;
     select value into e from jsonb_array_elements(d->'entries') where value->>'id' = c->>'entry_id';
     if not public.lexicon_ready(e) or (e->>'suspended')::boolean or (c->>'kind' = 'production' and (not (d#>>'{settings,production_enabled}')::boolean or length(trim(e->>'meaning_zh'))=0))
        or (c->>'kind' = 'cloze' and (not (d#>>'{settings,cloze_enabled}')::boolean or e->>'example' !~ '\{\{[^{}]+\}\}')) then raise exception '词条已暂停、尚未补全或题型已关闭。'; end if;
@@ -269,7 +269,7 @@ begin
     if (event->>'undone')::boolean then return 'null'::jsonb; end if;
     select value into latest from jsonb_array_elements(d->'reviews') with ordinality as v(value,n) where not (value->>'undone')::boolean order by n desc limit 1;
     select value into c from jsonb_array_elements(d->'cards') where value->>'id' = event->>'card_id';
-    if latest->>'id' <> event->>'id' or c is null or c->'revision' <> event#>'{after,revision}' then raise exception '已有更新的学习操作，无法撤销这条评分。' using errcode = '40001'; end if;
+    if latest->>'id' <> event->>'id' or c is null or c->'revision' <> event#>'{after,revision}' then raise exception '已有更新的学习操作，无法撤销这条评分。' using errcode = 'PT409'; end if;
     c := event->'before' || jsonb_build_object('revision',(c->>'revision')::numeric + 1);
     select jsonb_agg(case when v->>'id' = event->>'id' then jsonb_set(v,'{undone}','true'::jsonb) else v end) into arr from jsonb_array_elements(d->'reviews') as v;
     d := jsonb_set(d,'{reviews}',arr);
@@ -303,7 +303,7 @@ begin
     if not public.lexicon_int(p_payload->'revision') then raise exception '词条版本无效。'; end if;
     select value into e from jsonb_array_elements(d->'entries') where value->>'id' = p_payload->>'id';
     if e is null then return 'null'::jsonb; end if;
-    if e->'revision' <> p_payload->'revision' then raise exception '词条已更新，请刷新后再删除。' using errcode = '40001'; end if;
+    if e->'revision' <> p_payload->'revision' then raise exception '词条已更新，请刷新后再删除。' using errcode = 'PT409'; end if;
     select coalesce(jsonb_agg(v),'[]'::jsonb) into arr from jsonb_array_elements(d->'entries') as v where v->>'id' <> e->>'id'; d := jsonb_set(d,'{entries}',arr);
     foreach k in array array['cards','reviews'] loop
       select coalesce(jsonb_agg(v),'[]'::jsonb) into arr from jsonb_array_elements(d->k) as v where v->>'entry_id' <> e->>'id'; d := jsonb_set(d,array[k],arr);

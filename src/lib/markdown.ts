@@ -83,7 +83,8 @@ export function parseMarkdown(text: string): MarkdownResult {
     }
     const field = /^[-*+]\s+([^:：]+)[:：]\s?(.*)$/.exec(line);
     if (field) {
-      const key = fields[field[1].trim()];
+      const fieldName = field[1].trim();
+      const key = Object.hasOwn(fields, fieldName) ? fields[fieldName] : undefined;
       if (!key) {
         result.issues.push({ line: index + 1, message: `未识别字段「${field[1].trim()}」，已保留到笔记。` });
         current.values.notes = [current.values.notes, line].filter(Boolean).join('\n');

@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { PGlite } from '@electric-sql/pglite';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { validateBackup } from '../../src/lib/backup';
@@ -36,8 +36,10 @@ beforeAll(async () => {
     grant usage on schema auth to anon, authenticated;
     grant execute on function auth.uid() to anon, authenticated;
   `);
-  const migration = await readFile(new URL('../migrations/202610090001_lexicon.sql', import.meta.url), 'utf8');
-  await db.exec(migration);
+  const directory = new URL('../migrations/', import.meta.url);
+  for (const filename of (await readdir(directory)).filter(name => name.endsWith('.sql')).sort()) {
+    await db.exec(await readFile(new URL(filename, directory), 'utf8'));
+  }
   await sql(`select set_config('request.jwt.claim.sub', $1, false)`, [uid]);
   await db.exec('set role authenticated');
 }, 60_000);
@@ -78,7 +80,7 @@ describe('Supabase SQL RPC contracts on PostgreSQL', () => {
     await rpc('submit_review', [input]);
     expect((await load()).reviews.filter(review => review.id === input.operation_id)).toHaveLength(1);
     await expect(rpc('submit_review', [{ ...input, rating: 1 }])).rejects.toThrow('编号');
-    await expect(rpc('submit_review', [{ ...input, operation_id: crypto.randomUUID() }])).rejects.toThrow('进度');
+    await expect(rpc('submit_review', [{ ...input, operation_id: crypto.randomUUID() }])).rejects.toMatchObject({ code: 'PT409', message: expect.stringContaining('进度') });
   });
 
   it('adds optional cards without resetting progress, buries siblings, and undoes atomically', async () => {
@@ -110,7 +112,7 @@ describe('Supabase SQL RPC contracts on PostgreSQL', () => {
     expect(current.cards.some(item => item.entry_id === entry.id)).toBe(false);
     expect(current.reviews.some(item => item.entry_id === entry.id)).toBe(false);
     expect(current.batches.some(item => item.entry_ids.includes(entry.id) || item.completed_ids.includes(entry.id))).toBe(false);
-    await expect(rpc('save_entries', [[entry]])).rejects.toThrow('删除');
+    await expect(rpc('save_entries', [[entry]])).rejects.toMatchObject({ code: 'PT409', message: expect.stringContaining('删除') });
     await expect(rpc('submit_review', [stale])).rejects.toThrow('删除');
   });
 
@@ -136,8 +138,36 @@ describe('Supabase SQL RPC contracts on PostgreSQL', () => {
     await rpc('save_entries', [[changed]]);
     await expect(rpc('save_entries', [[makeEntry(30), changed]])).rejects.toThrow('修改');
     expect((await load()).entries).toHaveLength(data.entries.length);
-    await expect(rpc('delete_entry', [changed.id, changed.revision])).rejects.toThrow('更新');
+    await expect(rpc('delete_entry', [changed.id, changed.revision])).rejects.toMatchObject({ code: 'PT409', message: expect.stringContaining('更新') });
     await expect(sql('select public.delete_entry($1, $2)', [changed.id, null])).rejects.toThrow('版本');
+  });
+
+  it('returns PT409 for a stale undo instead of a retryable serialization failure', async () => {
+    const data = await load();
+    const first = await inputFor(data.entries[0].id);
+    await rpc('submit_review', [first]);
+    const second = await inputFor(data.entries[1].id);
+    await rpc('submit_review', [second]);
+    await expect(rpc('undo_review', [first.operation_id])).rejects.toMatchObject({ code: 'PT409', message: expect.stringContaining('无法撤销') });
+  });
+
+  it('upgrades an already deployed 40001 function while preserving restricted access', async () => {
+    await db.exec('begin; reset role;');
+    try {
+      const result = await sql("select pg_get_functiondef('public.lexicon_action(text,jsonb)'::regprocedure) as body");
+      const current = (result.rows[0] as { body: string }).body;
+      expect(current.match(/errcode = 'PT409'/g)).toHaveLength(4);
+      await db.exec(current.replaceAll("errcode = 'PT409'", "errcode = '40001'"));
+      const upgrade = await readFile(new URL('../migrations/202610090002_conflict_status.sql', import.meta.url), 'utf8');
+      await db.exec(upgrade);
+      await db.exec(upgrade); // Applying the correction twice is harmless.
+      const changed = await sql("select pg_get_functiondef('public.lexicon_action(text,jsonb)'::regprocedure) as body");
+      const patched = (changed.rows[0] as { body: string }).body;
+      expect(patched.match(/errcode = 'PT409'/g)).toHaveLength(4);
+      expect(patched).not.toContain("errcode = '40001'");
+      await db.exec('set role authenticated');
+      await expect(rpc('lexicon_action', ['load'])).rejects.toThrow('permission denied');
+    } finally { await db.exec('rollback'); }
   });
 
   it('requires a signed-in user for every RPC', async () => {

@@ -87,7 +87,7 @@ export default function App() {
   };
   const signOut=async()=>{
     try {
-      if(demo){localStorage.removeItem('lexicon.demo.active');setDemo(false);}else if(supabase){const {error}=await supabase.auth.signOut();if(error)throw error;}
+      if(demo){localStorage.removeItem('lexicon.demo.active');setDemo(false);}else if(supabase){const {error}=await supabase.auth.signOut({ scope: 'local' });if(error)throw error;}
       setSnapshot(emptySnapshot());navigate('today');
     }catch(error){notify((error as Error).message,'error');}
   };

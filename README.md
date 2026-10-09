@@ -32,7 +32,7 @@ npm run dev
 
 详细步骤见 [supabase/README.md](supabase/README.md)。简要流程：
 
-1. 新建 Supabase 项目，在 SQL Editor 执行 [数据库迁移](supabase/migrations/202610090001_lexicon.sql)。
+1. 新建 Supabase 项目，在 SQL Editor 按文件名升序依次执行 [migrations 目录](supabase/migrations) 中全部 SQL：先建表迁移，再执行错误码修正迁移。已部署初版的项目只追加执行 [冲突错误码修正](supabase/migrations/202610090002_conflict_status.sql)，不要重跑初始建表 SQL。
 2. Authentication 设置中关闭新用户注册与匿名登录，保留 Email 登录。在 Users 中预先创建自己的邮箱密码账号。
 3. 复制 `.env.example` 为 `.env.local`，填写 Project URL 与 publishable key。
 

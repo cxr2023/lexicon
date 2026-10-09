@@ -1,6 +1,6 @@
 # Supabase 配置
 
-1. 创建一个 Supabase 项目。到 **SQL Editor**，完整执行一次 `migrations/202610090001_lexicon.sql`。已有 Supabase CLI 项目也可使用 `supabase db push`。
+1. 创建一个 Supabase 项目。到 **SQL Editor**，按文件名升序依次完整执行 `migrations/` 中所有 `.sql` 文件，每个文件执行一次。已部署初版的项目只需追加执行 `202610090002_conflict_status.sql`，不要重新运行建表迁移。已有 Supabase CLI 项目也可使用 `supabase db push`。
 2. 在 **Authentication → Sign In / Providers** 关闭允许新用户注册的开关，保留 Email 登录。在 **Authentication → Users → Add user** 创建个人邮箱密码账号并确认邮箱。网站只提供登录，不公开注册。
 3. 在项目的 **Connect / API** 页面复制 Project URL 和 **publishable key**，写入仓库根目录的 `.env.local`：
 
@@ -26,7 +26,7 @@
 - `save_settings(p_settings)`：验证设置并补建可选题型。
 - `restore_backup(p_backup)`：严格验证版本、字段、引用关系后一次替换，提升条目和卡片版本，拒绝恢复前未完成的旧写入。
 
-所有 RPC 属于当前登录账号，客户端不传 user ID。内部 `lexicon_*` 辅助函数禁止客户端直接调用。客户端根据 `ts-fsrs` 计算下次状态，服务器验证状态形状、递增作答次数和版本；本产品是个人自评工具，不是防作弊考试系统。
+所有 RPC 属于当前登录账号，客户端不传 user ID。应用版本冲突使用 `PT409`，经 PostgREST 返回 HTTP 409；不要改成会触发事务重试的 `40001`。内部 `lexicon_*` 辅助函数禁止客户端直接调用。客户端根据 `ts-fsrs` 计算下次状态，服务器验证状态形状、递增作答次数和版本；本产品是个人自评工具，不是防作弊考试系统。
 
 永久删除后没有应用内回收站。用户之前另行导出的文件、Supabase 托管平台备份不受该操作影响；主动导入旧备份可恢复其中的内容。
 
