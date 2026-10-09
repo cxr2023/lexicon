@@ -4,6 +4,7 @@ import type { Entry, EntryType, WorkspaceProps } from '../types';
 import { createEntry, isReady } from '../lib/domain';
 import { exportMarkdown } from '../lib/markdown';
 import { downloadText } from '../lib/backup';
+import { normalizeEntryIpa } from '../lib/ipa';
 import EntryEditor, { typeLabels } from './EntryEditor';
 import { errorMessage, Modal } from './Common';
 
@@ -56,7 +57,7 @@ export default function Library({ snapshot, repository, refresh, notify }: Works
   async function save(event: FormEvent) {
     event.preventDefault();
     if (!editing?.term.trim()) return;
-    if (await run(() => repository.saveEntries([{ ...editing, term: editing.term.trim() }]), isNew ? '词条已收入词库。' : '词条已更新，学习进度已保留。')) setEditing(null);
+    if (await run(() => repository.saveEntries([normalizeEntryIpa({ ...editing, term: editing.term.trim() })]), isNew ? '词条已收入词库。' : '词条已更新，学习进度已保留。')) setEditing(null);
   }
   const toggle = (entry: Entry, field: 'favorite' | 'suspended') => run(
     () => repository.saveEntries([{ ...entry, [field]: !entry[field] }]),

@@ -4,11 +4,12 @@ import type { Entry, WorkspaceProps } from '../types';
 import { createEntry, isReady } from '../lib/domain';
 import { buildEnrichmentPrompt, exportMarkdown, parseMarkdown, type MarkdownIssue } from '../lib/markdown';
 import { downloadText } from '../lib/backup';
+import { needsIpaNotationReview, normalizeEntryIpa } from '../lib/ipa';
 import EntryEditor, { typeLabels } from './EntryEditor';
 import { errorMessage, Modal } from './Common';
 
 export interface ImportRow {
-  key: string; entry: Entry; line: number; suppliedId?: string;
+  key: string; entry: Entry; line: number; suppliedId?: string; ipaNormalized?: boolean;
   action: 'auto' | 'merge' | 'separate' | 'skip'; targetId?: string; overwrite: boolean;
 }
 interface PlannedRow {
@@ -34,7 +35,9 @@ export function buildImportPlan(rows: ImportRow[], existing: Entry[]) {
   const existingIds = new Set(existing.map(entry => entry.id));
   const changed = new Map<string, Entry>();
   const planned: PlannedRow[] = [];
-  for (const row of rows) {
+  for (const originalRow of rows) {
+    const entry = normalizeEntryIpa(originalRow.entry);
+    const row = entry === originalRow.entry ? originalRow : { ...originalRow, entry, ipaNormalized: true };
     const exact = row.suppliedId ? working.get(row.suppliedId) : undefined;
     const candidates = row.suppliedId ? [] : [...working.values()].filter(entry => canonical(entry.term) === canonical(row.entry.term));
     const target = exact ?? candidates.find(entry => entry.id === row.targetId) ?? candidates[0];
@@ -87,7 +90,7 @@ export default function ImportPage({ snapshot, repository, refresh, notify }: Wo
       const result = parseMarkdown(text);
       setRows(result.entries.map(entry => ({
         key: entry.id, entry, line: result.metadata[entry.id]?.line ?? 1,
-        suppliedId: result.metadata[entry.id]?.suppliedId, action: 'auto', overwrite: false,
+        suppliedId: result.metadata[entry.id]?.suppliedId, ipaNormalized: result.metadata[entry.id]?.ipaNormalized, action: 'auto', overwrite: false,
       })));
       setIssues(result.issues); setParsedSource(text);
       if (!result.entries.length && !result.issues.length) notify('还没有识别到词条，请先输入一些英语。');
@@ -102,7 +105,7 @@ export default function ImportPage({ snapshot, repository, refresh, notify }: Wo
       const text = await file.text();
       const result = parseMarkdown(text);
       setSource(text); setParsedSource(text); setIssues(result.issues);
-      setRows(result.entries.map(entry => ({ key: entry.id, entry, line: result.metadata[entry.id]?.line ?? 1, suppliedId: result.metadata[entry.id]?.suppliedId, action: 'auto', overwrite: false })));
+      setRows(result.entries.map(entry => ({ key: entry.id, entry, line: result.metadata[entry.id]?.line ?? 1, suppliedId: result.metadata[entry.id]?.suppliedId, ipaNormalized: result.metadata[entry.id]?.ipaNormalized, action: 'auto', overwrite: false })));
     } catch (error) { notify(errorMessage(error), 'error'); }
     finally { setReading(false); }
   }
@@ -120,7 +123,8 @@ export default function ImportPage({ snapshot, repository, refresh, notify }: Wo
   function savePreview(event: FormEvent) {
     event.preventDefault();
     if (!editing?.entry.term.trim()) return;
-    patchRow(editing.key, { entry: { ...editing.entry, term: editing.entry.term.trim() }, targetId: undefined });
+    const entry = normalizeEntryIpa({ ...editing.entry, term: editing.entry.term.trim() });
+    patchRow(editing.key, { entry, targetId: undefined, ...(entry.ipa_us !== editing.entry.ipa_us ? { ipaNormalized: true } : {}) });
     setEditing(null);
   }
   async function copyPrompt(text: string) {
@@ -134,8 +138,8 @@ export default function ImportPage({ snapshot, repository, refresh, notify }: Wo
     }
   }
   function downloadTemplate() {
-    const entry = createEntry({ term: 'take something for granted', type: 'phrase', ipa_us: '/teɪk ˈsʌmθɪŋ fər ˈɡræntɪd/', definition_en: 'To fail to appreciate something because you assume it will always be available.', meaning_zh: '把某事视为理所当然', example: 'We often {{take clean water for granted}}.', example_translation: '我们经常把清洁用水视为理所当然。', tags: ['日常表达'] });
-    const text = `# 词间 · Markdown 导入模板\n\n${exportMarkdown([entry]).replace(/^- ID:.*\n/gm, '')}`;
+    const entry = createEntry({ term: 'take something for granted', type: 'phrase', ipa_us: '/teɪk ˈsʌmθɪŋ fɚ ˈɡræntɪd/', definition_en: 'To fail to appreciate something because you assume it will always be available.', meaning_zh: '把某事视为理所当然', example: 'We often {{take clean water for granted}}.', example_translation: '我们经常把清洁用水视为理所当然。', tags: ['日常表达'] });
+    const text = `# 词间 · Markdown 导入模板（美式词典宽式）\n\n${exportMarkdown([entry]).replace(/^- ID:.*\n/gm, '')}`;
     downloadText('lexicon-template.md', text, 'text/markdown;charset=utf-8');
   }
 
@@ -155,6 +159,8 @@ export default function ImportPage({ snapshot, repository, refresh, notify }: Wo
         return <article className={`import-preview-row${row.action === 'skip' ? ' skipped' : ''}`} key={row.key}>
           <div className="preview-entry-heading"><label className="preview-select"><input type="checkbox" checked={row.action !== 'skip'} disabled={busy} onChange={event => patchRow(row.key, { action: event.target.checked ? 'auto' : 'skip' })} aria-label={`导入 ${row.entry.term}`} /><strong lang="en">{row.entry.term}</strong></label><div className="toolbar"><span className="tag">{typeLabels[row.entry.type]}</span><span className="tag">{isReady(item.result ?? row.entry) ? '可学习' : '草稿'}</span><button className="btn ghost" disabled={busy} onClick={() => setEditing({ key: row.key, entry: { ...row.entry, tags: [...row.entry.tags] } })}>编辑</button></div></div>
           <p className="muted">第 {row.line} 行 · <span className="ipa">{row.entry.ipa_us || '音标待补全'}</span></p><p className="preview-definition">{row.entry.definition_en || row.entry.meaning_zh || '英文释义待补全'}</p>
+          {row.ipaNormalized && <p className="match-note">音标写法已整理：ɹ → r，并清理隐藏字符；这不代表读音已经核验。</p>}
+          {needsIpaNotationReview(row.entry.ipa_us) && <p className="match-note">含 ᵻ / ɐ / ɾ 等特殊转写，需要按具体单词核对为常见美式词典记法；未自动替换。</p>}
           {row.suppliedId && <p className="match-note">{item.target ? '已通过 ID 匹配词库中的原词条。' : '这是尚未收入词库的有效 ID，将新增词条。'}</p>}
           {duplicate && <div className="duplicate-choice"><label className="field"><span>发现同名词条，选择处理方式</span><select value={row.action} disabled={busy} onChange={event => patchRow(row.key, { action: event.target.value as ImportRow['action'] })}><option value="auto">请选择处理方式</option><option value="merge">合并到已有词条</option><option value="separate">作为独立词条保存</option><option value="skip">跳过此条</option></select></label>{row.action === 'merge' && <label className="field"><span>合并目标</span><select value={item.target?.id ?? ''} disabled={busy} onChange={event => patchRow(row.key, { targetId: event.target.value })}>{item.candidates.map(target => <option key={target.id} value={target.id}>{target.term} · {typeLabels[target.type]} · {target.meaning_zh || target.definition_en || target.id.slice(0, 8)}</option>)}</select></label>}</div>}
           {merging && <div className="merge-options"><p className="muted">默认仅补空白字段；原词条的收藏、暂停与学习进度会保留。如需更新「待确认」等占位内容，请勾选下方替换选项。</p><label><input type="checkbox" checked={row.overwrite} disabled={busy} onChange={event => patchRow(row.key, { overwrite: event.target.checked })} /> 允许导入的非空内容替换已有字段（含原文、类型和笔记）</label></div>}

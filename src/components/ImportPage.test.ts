@@ -33,6 +33,18 @@ describe('import preview decisions', () => {
     expect(plan.entries[0].id).toBe(incoming.id);
   });
 
+  it('normalizes incoming IPA but protects existing IPA until replacement is explicitly chosen', () => {
+    const existing = createEntry({ term: 'red', ipa_us: '/ɹed/', notes: 'Personal note', revision: 9, favorite: true });
+    const incoming = createEntry({ id: existing.id, term: 'red', ipa_us: '/ɹ\u200bed/', definition_en: 'A colour.' });
+    const rows = [row(incoming, { suppliedId: existing.id })];
+    const protectedPlan = buildImportPlan(rows, [existing]);
+    expect(protectedPlan.rows[0].row).toMatchObject({ ipaNormalized: true, entry: { ipa_us: '/red/' } });
+    expect(protectedPlan.entries[0]).toMatchObject({ ipa_us: existing.ipa_us, id: existing.id, revision: 9, notes: existing.notes, favorite: true });
+    const replacement = buildImportPlan([{ ...rows[0], overwrite: true }], [existing]);
+    expect(replacement.entries[0]).toMatchObject({ ipa_us: '/red/', id: existing.id, revision: 9, notes: existing.notes, favorite: true });
+    expect(incoming.ipa_us).toBe('/ɹ\u200bed/');
+  });
+
   it('detects same-file duplicates and folds a chosen merge into one new entry', () => {
     const first = createEntry({ term: 'resilient', ipa_us: '/rɪˈzɪliənt/' });
     const second = createEntry({ term: 'resilient', definition_en: 'Able to recover quickly.' });
