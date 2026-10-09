@@ -15,6 +15,8 @@
 - Markdown 内容导出、JSON 完整备份及预览恢复。
 - GitHub Pages 子路径、手机与电脑布局。
 
+音标统一使用随网站打包的 Noto Sans Regular，包含 IPA 扩展字符与希腊字母，不依赖设备安装字体或外部字体服务。字体许可证随站点发布在 `fonts/OFL-NotoSans.txt`。
+
 ## 本地运行
 
 使用 Node.js 22.12 或更新版本：
