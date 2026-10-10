@@ -1,4 +1,4 @@
-import type { Backup, Entry, FSRSState, Settings, Snapshot, StudyCard } from '../types';
+import type { Backup, Entry, FSRSState, Settings, Snapshot, StudyCard, WordForms } from '../types';
 import { UUID_PATTERN } from './markdown';
 
 type ObjectValue = Record<string, unknown>;
@@ -73,8 +73,30 @@ function validateCard(value: unknown, path: string, entryIds: Set<string>): Stud
   validateState(card.state, `${path}.state`);
   return card as unknown as StudyCard;
 }
+export function validateWordForms(value: unknown, path = 'word_forms'): WordForms {
+  const forms = object(value, path, [], ['verb', 'comparison', 'derivatives']);
+  const sections = {
+    verb: ['base', 'third_person', 'past', 'past_participle', 'present_participle'],
+    comparison: ['positive', 'comparative', 'superlative'],
+  };
+  for (const [name, required] of Object.entries(sections)) {
+    if (!Object.hasOwn(forms, name)) continue;
+    const section = object(forms[name], `${path}.${name}`, required, ['note']);
+    for (const key of required) text(section[key], `${path}.${name}.${key}`, 2000);
+    if (Object.hasOwn(section, 'note')) text(section.note, `${path}.${name}.note`, 20_000);
+  }
+  if (Object.hasOwn(forms, 'derivatives')) {
+    array(forms.derivatives, `${path}.derivatives`, 30).forEach((value, index) => {
+      const itemPath = `${path}.derivatives[${index}]`;
+      const item = object(value, itemPath, ['term', 'pos', 'meaning', 'affix']);
+      for (const key of ['term', 'pos', 'meaning', 'affix']) text(item[key], `${itemPath}.${key}`, 2000);
+    });
+  }
+  return forms as unknown as WordForms;
+}
+
 function validateEntry(value: unknown, path: string): Entry {
-  const entry = object(value, path, ['id', 'term', 'ipa_us', 'definition_en', 'meaning_zh', 'type', 'pos', 'example', 'example_translation', 'usage', 'tags', 'source', 'notes', 'favorite', 'suspended', 'created_at', 'updated_at', 'revision']);
+  const entry = object(value, path, ['id', 'term', 'ipa_us', 'definition_en', 'meaning_zh', 'type', 'pos', 'example', 'example_translation', 'usage', 'tags', 'source', 'notes', 'favorite', 'suspended', 'created_at', 'updated_at', 'revision'], ['word_forms']);
   uuid(entry.id, `${path}.id`);
   text(entry.term, `${path}.term`, 2000);
   if (!entry.term.trim()) fail(`${path}.term`, '不能为空。');
@@ -85,6 +107,7 @@ function validateEntry(value: unknown, path: string): Entry {
   numeric(entry.revision, `${path}.revision`, 0, 1_000_000_000, true);
   const tags = array(entry.tags, `${path}.tags`, 200);
   tags.forEach((tag, index) => text(tag, `${path}.tags[${index}]`, 200));
+  if (Object.hasOwn(entry, 'word_forms')) validateWordForms(entry.word_forms, `${path}.word_forms`);
   return entry as unknown as Entry;
 }
 export function validateSettings(value: unknown, path = 'settings'): Settings {

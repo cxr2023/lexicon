@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { Snapshot, StudyCard } from '../types';
+import type { Snapshot, StudyCard, WordForms } from '../types';
 import { exportBackup, parseBackup, validateBackup } from './backup';
 import { createEntry, emptySnapshot, initialState, schedule } from './domain';
 
@@ -23,6 +23,39 @@ describe('versioned backup validation', () => {
     expect(parseBackup(JSON.stringify(backup)).data).toEqual(original);
     backup.data.entries[0].ipa_us = 'modified';
     expect(original.entries[0].ipa_us).toBe('/ˈæpəl/');
+  });
+  it('keeps legacy v1 backups valid and roundtrips optional word-family metadata', () => {
+    const legacy = sample();
+    expect(Object.hasOwn(parseBackup(JSON.stringify(exportBackup(legacy))).data.entries[0], 'word_forms')).toBe(false);
+    const forms: WordForms = {
+      verb: { base: 'work', third_person: 'works', past: 'worked', past_participle: 'worked', present_participle: 'working', note: '规则变化' },
+      comparison: { positive: 'hard', comparative: 'harder', superlative: 'hardest', note: '' },
+      derivatives: [{ term: 'worker', pos: 'noun', meaning: 'A person who works.', affix: '-er' }],
+    };
+    const original = sample(); original.entries[0].word_forms = forms;
+    const backup = exportBackup(original);
+    expect(parseBackup(JSON.stringify(backup)).data).toEqual(original);
+    backup.data.entries[0].word_forms!.verb!.base = 'changed';
+    expect(original.entries[0].word_forms!.verb!.base).toBe('work');
+    original.entries[0].word_forms = {};
+    expect(parseBackup(JSON.stringify(exportBackup(original))).data.entries[0].word_forms).toEqual({});
+    original.entries[0].word_forms = { verb: { base: 'go', third_person: '', past: '', past_participle: '', present_participle: '' } };
+    expect(() => exportBackup(original)).not.toThrow();
+  });
+  it('rejects malformed or oversized word-family sections instead of dropping them', () => {
+    const backup = exportBackup(sample());
+    const withForms = (word_forms: unknown) => ({ ...backup, data: { ...backup.data, entries: [{ ...backup.data.entries[0], word_forms }] } });
+    const emptyVerb = { base: '', third_person: '', past: '', past_participle: '', present_participle: '' };
+    const derivative = { term: 'worker', pos: '', meaning: '', affix: '-er' };
+    for (const value of [null, [], 'go', { unknown: true }, { verb: {} }, { verb: { ...emptyVerb, base: 123 } },
+      { verb: { ...emptyVerb, unknown: '' } }, { comparison: { positive: 'good', comparative: 'better' } },
+      { comparison: { positive: '', comparative: '', superlative: '', note: false } },
+      { derivatives: null }, { derivatives: [{ term: 'worker' }] }, { derivatives: [{ ...derivative, unexpected: '' }] },
+      { derivatives: [{ ...derivative, meaning: [] }] }, { derivatives: Array.from({ length: 31 }, () => derivative) },
+      { verb: { ...emptyVerb, base: 'a'.repeat(2001) } }, { verb: { ...emptyVerb, note: 'a'.repeat(20001) } },
+      { derivatives: [{ ...derivative, affix: 'a'.repeat(2001) }] }]) {
+      expect(() => validateBackup(withForms(value))).toThrow('word_forms');
+    }
   });
   it('rejects malformed JSON, future versions and unsupported fields', () => {
     expect(() => parseBackup('{bad json}')).toThrow('JSON');

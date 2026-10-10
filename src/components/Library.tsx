@@ -5,7 +5,9 @@ import { createEntry, isReady } from '../lib/domain';
 import { exportMarkdown } from '../lib/markdown';
 import { downloadText } from '../lib/backup';
 import { normalizeEntryIpa } from '../lib/ipa';
+import { cleanTerm } from '../lib/wordForms';
 import EntryEditor, { typeLabels } from './EntryEditor';
+import WordForms, { hasWordForms, pruneEmptyWordForms } from './WordForms';
 import { errorMessage, Modal } from './Common';
 
 type LibraryFilter = 'all' | 'ready' | 'draft' | 'favorite' | 'suspended';
@@ -57,7 +59,14 @@ export default function Library({ snapshot, repository, refresh, notify }: Works
   async function save(event: FormEvent) {
     event.preventDefault();
     if (!editing?.term.trim()) return;
-    if (await run(() => repository.saveEntries([normalizeEntryIpa({ ...editing, term: editing.term.trim() })]), isNew ? '词条已收入词库。' : '词条已更新，学习进度已保留。')) setEditing(null);
+    const term = cleanTerm(editing.term);
+    if (!term) { notify('清理括号后词条为空，请填写需要学习的英语。', 'error'); return; }
+    const entry = normalizeEntryIpa({ ...editing, term });
+    const wordForms = pruneEmptyWordForms(entry.word_forms);
+    if (wordForms) entry.word_forms = wordForms;
+    else if (Object.hasOwn(editing, 'word_forms')) entry.word_forms = {};
+    else delete entry.word_forms;
+    if (await run(() => repository.saveEntries([entry]), isNew ? '词条已收入词库。' : '词条已更新，学习进度已保留。')) setEditing(null);
   }
   const toggle = (entry: Entry, field: 'favorite' | 'suspended') => run(
     () => repository.saveEntries([{ ...entry, [field]: !entry[field] }]),
@@ -77,14 +86,14 @@ export default function Library({ snapshot, repository, refresh, notify }: Works
       <div className="filter-tabs" aria-label="筛选词条状态">{filters.map(item => <button key={item.id} className={filter === item.id ? 'active' : ''} aria-pressed={filter === item.id} onClick={() => setFilter(item.id)}>{item.label}<span>{counts[item.id]}</span></button>)}</div>
       <div className="list-caption"><span>{visible.length} 个词条</span><span>每一次遇见，都值得记住。</span></div>
       {visible.length ? <div className="entry-list">{visible.map(entry => <article className="entry-row" key={entry.id}>
-        <button className="entry-main" onClick={() => setSelectedId(entry.id)}><div className="entry-title-line"><h3 lang="en">{entry.term}</h3><span className="tag">{typeLabels[entry.type]}</span>{!isReady(entry) && <span className="tag draft">待补全</span>}{entry.suspended && <span className="tag">已暂停</span>}</div><p className="entry-pronunciation">{entry.ipa_us || '美式音标待补全'}{entry.pos && ` · ${entry.pos}`}</p><p className="entry-definition" lang="en">{entry.definition_en || entry.meaning_zh || '先收入词库，释义可以稍后补全。'}</p>{!!entry.tags.length && <div className="entry-tags">{entry.tags.map(tag => <span key={tag}>#{tag}</span>)}</div>}</button>
+        <button className="entry-main" onClick={() => setSelectedId(entry.id)}><div className="entry-title-line"><h3 lang="en">{entry.term}</h3><span className="tag">{typeLabels[entry.type]}</span>{hasWordForms(entry.word_forms) && <span className="tag word-form-tag">有词形</span>}{!isReady(entry) && <span className="tag draft">待补全</span>}{entry.suspended && <span className="tag">已暂停</span>}</div><p className="entry-pronunciation">{entry.ipa_us || '美式音标待补全'}{entry.pos && ` · ${entry.pos}`}</p><p className="entry-definition" lang="en">{entry.definition_en || entry.meaning_zh || '先收入词库，释义可以稍后补全。'}</p>{!!entry.tags.length && <div className="entry-tags">{entry.tags.map(tag => <span key={tag}>#{tag}</span>)}</div>}</button>
         <div className="entry-actions"><button className={`icon-button${entry.favorite ? ' active' : ''}`} disabled={busy} title={entry.favorite ? '取消收藏' : '收藏词条'} aria-label={`${entry.favorite ? '取消收藏' : '收藏'} ${entry.term}`} aria-pressed={entry.favorite} onClick={() => void toggle(entry, 'favorite')}><Bookmark size={18} fill={entry.favorite ? 'currentColor' : 'none'} /></button><button className="icon-button" title="查看词条" aria-label={`查看 ${entry.term}`} onClick={() => setSelectedId(entry.id)}><ArrowUpRight size={19} /></button><button className="icon-button danger-text" disabled={busy} title="永久删除词条" aria-label={`永久删除 ${entry.term}`} onClick={() => askDelete(entry)}><Trash2 size={17} /></button></div>
       </article>)}</div> : <div className="empty-state"><Bookmark size={32} strokeWidth={1.3} /><h3>{snapshot.entries.length ? '没有找到匹配的词条' : '从你今天遇见的一个词开始'}</h3><p className="muted">{snapshot.entries.length ? '试试其他关键词，或切换类型与状态。' : '添加单词、短语或句子，也可以从「导入」批量整理。'}</p>{!snapshot.entries.length && <button className="btn primary" onClick={() => openEditor()}>添加第一个词条</button>}</div>}
     </div>
     {editing && <Modal title={isNew ? '收下一个新表达' : '编辑词条'} wide onClose={() => { if (!busy) setEditing(null); }}><form onSubmit={event => void save(event)}><EntryEditor key={editing.id} entry={editing} onChange={setEditing} disabled={busy} /><div className="modal-actions"><button type="button" className="btn secondary" disabled={busy} onClick={() => setEditing(null)}>取消</button><button className="btn primary" disabled={busy || !editing.term.trim()}>{busy ? '保存中…' : '保存词条'}</button></div></form></Modal>}
     {detail && <Modal title={detail.term} wide onClose={() => setSelectedId(null)}><div className="entry-detail"><div className="toolbar"><span className="tag">{typeLabels[detail.type]}</span>{detail.pos && <span className="muted">{detail.pos}</span>}<span className="entry-pronunciation">{detail.ipa_us || '音标待补全'}</span></div><dl>{[
       ['英文释义', detail.definition_en], ['中文释义', detail.meaning_zh], ['例句', detail.example], ['例句翻译', detail.example_translation], ['用法与搭配', detail.usage], ['标签', detail.tags.join(' · ')], ['来源', detail.source], ['个人笔记', detail.notes],
-    ].filter(([, value]) => value).map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>{!isReady(detail) && <p className="notice">这个词条还是草稿。补齐美式音标和英文释义后，就能开始学习。</p>}<div className="toolbar"><button className="btn secondary" disabled={busy} onClick={() => void toggle(detail, 'favorite')}><Bookmark size={16} />{detail.favorite ? '取消收藏' : '收藏'}</button><button className="btn secondary" disabled={busy} onClick={() => void toggle(detail, 'suspended')}>{detail.suspended ? <Play size={16} /> : <Pause size={16} />}{detail.suspended ? '恢复学习' : '暂停学习'}</button></div><div className="modal-actions"><button className="btn danger" disabled={busy} onClick={() => askDelete(detail)}>永久删除</button><button className="btn primary" disabled={busy} onClick={() => openEditor(detail)}>编辑词条</button></div></div></Modal>}
+    ].filter(([, value]) => value).map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl><WordForms forms={detail.word_forms} />{!isReady(detail) && <p className="notice">这个词条还是草稿。补齐美式音标和英文释义后，就能开始学习。</p>}<div className="toolbar"><button className="btn secondary" disabled={busy} onClick={() => void toggle(detail, 'favorite')}><Bookmark size={16} />{detail.favorite ? '取消收藏' : '收藏'}</button><button className="btn secondary" disabled={busy} onClick={() => void toggle(detail, 'suspended')}>{detail.suspended ? <Play size={16} /> : <Pause size={16} />}{detail.suspended ? '恢复学习' : '暂停学习'}</button></div><div className="modal-actions"><button className="btn danger" disabled={busy} onClick={() => askDelete(detail)}>永久删除</button><button className="btn primary" disabled={busy} onClick={() => openEditor(detail)}>编辑词条</button></div></div></Modal>}
     {deleting && <Modal title="永久删除词条" onClose={() => { if (!busy) setDeleting(null); }}><form onSubmit={event => void confirmDelete(event)}><p>确定永久删除 <strong>{deleting.term}</strong>？对应的学习卡片和复习记录也会删除，无法撤销。</p><div className="modal-actions"><button type="button" className="btn secondary" disabled={busy} onClick={() => setDeleting(null)}>取消</button><button className="btn danger" disabled={busy}>{busy ? '删除中…' : '永久删除'}</button></div></form></Modal>}
   </section>;
 }

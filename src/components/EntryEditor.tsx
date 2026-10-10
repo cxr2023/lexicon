@@ -1,5 +1,6 @@
 import { useId, useState } from 'react';
 import type { Entry } from '../types';
+import { WordFormsEditor } from './WordForms';
 
 export const typeLabels: Record<Entry['type'], string> = { word: '单词', phrase: '短语', idiom: '习惯用语', sentence: '句子' };
 
@@ -11,7 +12,7 @@ export default function EntryEditor({ entry, onChange, disabled = false, showPre
   const set = <K extends keyof Entry>(key: K, value: Entry[K]) => onChange({ ...entry, [key]: value });
   return <fieldset className="entry-editor" disabled={disabled}>
     <div className="form-grid">
-      <div className="field field-wide"><label htmlFor={`${prefix}-term`}>英语词条 <span aria-hidden="true">*</span></label><input id={`${prefix}-term`} value={entry.term} onChange={event => set('term', event.target.value)} required placeholder="例如：take something for granted" lang="en" autoComplete="off" /></div>
+      <div className="field field-wide"><label htmlFor={`${prefix}-term`}>英语词条 <span aria-hidden="true">*</span></label><input id={`${prefix}-term`} aria-describedby={`${prefix}-term-hint`} value={entry.term} onChange={event => set('term', event.target.value)} required placeholder="例如：take something for granted" lang="en" autoComplete="off" /><small id={`${prefix}-term-hint`}>保存时会清理词头中成对中英文括号及其中内容；需要保留的说明请写入用法或笔记。</small></div>
       <div className="field"><label htmlFor={`${prefix}-type`}>词条类型</label><select id={`${prefix}-type`} value={entry.type} onChange={event => set('type', event.target.value as Entry['type'])}>{Object.entries(typeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></div>
       <div className="field"><label htmlFor={`${prefix}-pos`}>词性</label><input id={`${prefix}-pos`} value={entry.pos} onChange={event => set('pos', event.target.value)} placeholder="例如：verb / noun" /></div>
       <div className="field field-wide"><label htmlFor={`${prefix}-ipa`}>美式音标 <span className="muted">· 加入学习前必填</span></label><input className="ipa-input" id={`${prefix}-ipa`} aria-describedby={`${prefix}-ipa-hint`} value={entry.ipa_us} onChange={event => set('ipa_us', event.target.value)} placeholder="例如：/ɡrænt/" lang="en" /><small className="muted" id={`${prefix}-ipa-hint`}>采用 Cambridge US 风格的常见美式词典宽式：r、ɚ / ɝː，重音放在音节起始处。保存时仅将 ɹ 整理为 r 并清理隐藏字符；具体读音仍需核对，存疑请写「待确认」。</small></div>
@@ -24,6 +25,7 @@ export default function EntryEditor({ entry, onChange, disabled = false, showPre
       <div className="field"><label htmlFor={`${prefix}-source`}>来源</label><input id={`${prefix}-source`} value={entry.source} onChange={event => set('source', event.target.value)} placeholder="书名、文章或链接" /></div>
       <div className="field field-wide"><label htmlFor={`${prefix}-notes`}>个人笔记</label><textarea id={`${prefix}-notes`} value={entry.notes} onChange={event => set('notes', event.target.value)} rows={3} /></div>
     </div>
+    <WordFormsEditor value={entry.word_forms} onChange={value => set('word_forms', value)} />
     {showPreferences && <div className="checkbox-row"><label><input type="checkbox" checked={entry.favorite} onChange={event => set('favorite', event.target.checked)} /> 收藏词条</label><label><input type="checkbox" checked={entry.suspended} onChange={event => set('suspended', event.target.checked)} /> 暂停学习</label></div>}
     <p className="muted form-hint">只填写英语词条也可以保存为草稿。补齐美式音标与英文释义后，即可加入学习。</p>
   </fieldset>;

@@ -3,7 +3,7 @@ import { PGlite } from '@electric-sql/pglite';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { validateBackup } from '../../src/lib/backup';
 import { createEntry, schedule } from '../../src/lib/domain';
-import type { ReviewInput, Snapshot, StudyBatch } from '../../src/types';
+import type { ReviewInput, Snapshot, StudyBatch, WordForms } from '../../src/types';
 
 let db: PGlite;
 const uid = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
@@ -149,6 +149,96 @@ describe('Supabase SQL RPC contracts on PostgreSQL', () => {
     const second = await inputFor(data.entries[1].id);
     await rpc('submit_review', [second]);
     await expect(rpc('undo_review', [first.operation_id])).rejects.toMatchObject({ code: 'PT409', message: expect.stringContaining('无法撤销') });
+  });
+
+  it('preserves word forms omitted by old clients, allows explicit clearing, and leaves study progress intact', async () => {
+    const before = await load();
+    const target = before.entries[0];
+    const forms: WordForms = {
+      verb: { base: 'work', third_person: 'works', past: 'worked', past_participle: 'worked', present_participle: 'working', note: '规则变化' },
+      comparison: { positive: 'hard', comparative: 'harder', superlative: 'hardest' },
+      derivatives: [{ term: 'worker', pos: 'noun', meaning: 'A person who works.', affix: '-er' }],
+    };
+    await rpc('save_entries', [[{ ...target, word_forms: forms }]]);
+    let data = await load();
+    expect(data.entries.find(entry => entry.id === target.id)?.word_forms).toEqual(forms);
+    const legacy = { ...data.entries.find(entry => entry.id === target.id)!, notes: 'Edited in an older app' };
+    delete legacy.word_forms;
+    await rpc('save_entries', [[legacy]]);
+    data = await load();
+    const preserved = data.entries.find(entry => entry.id === target.id)!;
+    expect(preserved.word_forms).toEqual(forms);
+    expect(preserved.notes).toBe(legacy.notes);
+    expect(preserved.revision).toBe(target.revision + 2);
+    await expect(rpc('save_entries', [[{ ...target, word_forms: {} }]])).rejects.toMatchObject({ code: 'PT409' });
+    await rpc('save_entries', [[{ ...preserved, word_forms: {} }]]);
+    data = await load();
+    expect(data.entries.find(entry => entry.id === target.id)?.word_forms).toEqual({});
+    expect(data.cards).toEqual(before.cards);
+    expect(data.reviews).toEqual(before.reviews);
+    expect(data.batches).toEqual(before.batches);
+  });
+
+  it('roundtrips partial and maximum-sized word forms and still restores legacy v1 backups', async () => {
+    const partial: WordForms = { verb: { base: 'go', third_person: '', past: '', past_participle: '', present_participle: '' } };
+    const maximum: WordForms = {
+      comparison: { positive: 'a'.repeat(2000), comparative: '', superlative: '', note: 'a'.repeat(20000) },
+      derivatives: Array.from({ length: 30 }, () => ({ term: '', pos: '', meaning: '', affix: 'a'.repeat(2000) })),
+    };
+    const entry = { ...makeEntry(50), word_forms: partial };
+    await rpc('save_entries', [[entry]]);
+    let data = await load();
+    expect(data.entries.find(item => item.id === entry.id)?.word_forms).toEqual(partial);
+    await rpc('save_entries', [[{ ...data.entries.find(item => item.id === entry.id)!, word_forms: maximum }]]);
+    data = await load();
+    await rpc('restore_backup', [{ version: 1, exported_at: new Date().toISOString(), data }]);
+    let restored = await load();
+    expect(restored.entries.find(item => item.id === entry.id)?.word_forms).toEqual(maximum);
+    expect(restored.cards.map(card => card.state)).toEqual(data.cards.map(card => card.state));
+    const legacy = structuredClone(restored);
+    legacy.entries.forEach(item => { delete item.word_forms; });
+    await rpc('restore_backup', [{ version: 1, exported_at: new Date().toISOString(), data: legacy }]);
+    restored = await load();
+    expect(restored.entries.every(item => !Object.hasOwn(item, 'word_forms'))).toBe(true);
+  });
+
+  it('rejects malformed word forms in both writes and restores without any partial commit', async () => {
+    const before = await load();
+    const emptyVerb = { base: '', third_person: '', past: '', past_participle: '', present_participle: '' };
+    const derivative = { term: 'worker', pos: '', meaning: '', affix: '-er' };
+    const invalid = [null, [], 'go', { unknown: true }, { verb: {} }, { verb: { ...emptyVerb, base: 123 } },
+      { verb: { ...emptyVerb, unknown: '' } }, { comparison: { positive: 'good', comparative: 'better' } },
+      { comparison: { positive: '', comparative: '', superlative: '', note: false } },
+      { derivatives: null }, { derivatives: [{ term: 'worker' }] }, { derivatives: [{ ...derivative, unexpected: '' }] },
+      { derivatives: [{ ...derivative, meaning: [] }] }, { derivatives: Array.from({ length: 31 }, () => derivative) },
+      { verb: { ...emptyVerb, base: 'a'.repeat(2001) } }, { verb: { ...emptyVerb, note: 'a'.repeat(20001) } },
+      { derivatives: [{ ...derivative, affix: 'a'.repeat(2001) }] }];
+    for (const word_forms of invalid) {
+      const entry = { ...before.entries[0], word_forms };
+      await expect(rpc('save_entries', [[makeEntry(60), entry]])).rejects.toThrow(/词形|派生词/);
+      await expect(rpc('restore_backup', [{ version: 1, exported_at: new Date().toISOString(),
+        data: { ...before, entries: [entry, ...before.entries.slice(1)] } }])).rejects.toThrow(/词形|派生词/);
+    }
+    expect(await load()).toEqual(before);
+  });
+
+  it('can reapply the word-form upgrade without weakening function permissions or conflict checks', async () => {
+    await db.exec('begin; reset role;');
+    try {
+      const functionDefinition = async () => (await sql("select pg_get_functiondef('public.lexicon_action(text,jsonb)'::regprocedure) as body")).rows[0] as { body: string };
+      const before = await functionDefinition();
+      const upgrade = await readFile(new URL('../migrations/202610100001_word_forms.sql', import.meta.url), 'utf8');
+      await db.exec(upgrade);
+      expect(await functionDefinition()).toEqual(before);
+      expect(before.body.match(/errcode = 'PT409'/g)).toHaveLength(4);
+      const permissions = await sql(`select
+        has_function_privilege('authenticated', 'public.lexicon_validate_word_forms(jsonb)', 'EXECUTE') as validator,
+        has_function_privilege('anon', 'public.lexicon_validate_word_forms(jsonb)', 'EXECUTE') as anon_validator,
+        has_function_privilege('authenticated', 'public.lexicon_action(text,jsonb)', 'EXECUTE') as dispatcher,
+        prosecdef as security_definer, proconfig from pg_proc where oid = 'public.lexicon_action(text,jsonb)'::regprocedure`);
+      expect(permissions.rows[0]).toMatchObject({ validator: false, anon_validator: false, dispatcher: false, security_definer: true });
+      expect((permissions.rows[0] as { proconfig: string[] }).proconfig).toContain('search_path=public, pg_temp');
+    } finally { await db.exec('rollback'); }
   });
 
   it('upgrades an already deployed 40001 function while preserving restricted access', async () => {

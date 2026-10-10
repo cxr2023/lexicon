@@ -2,11 +2,21 @@ export type EntryType = 'word' | 'phrase' | 'idiom' | 'sentence';
 export type CardKind = 'recognition' | 'production' | 'cloze';
 export type RatingValue = 1 | 2 | 3 | 4;
 
+export interface VerbForms {
+  base: string; third_person: string; past: string; past_participle: string; present_participle: string; note?: string;
+}
+export interface ComparisonForms {
+  positive: string; comparative: string; superlative: string; note?: string;
+}
+export interface Derivative { term: string; pos: string; meaning: string; affix: string }
+export interface WordForms { verb?: VerbForms; comparison?: ComparisonForms; derivatives?: Derivative[] }
+
 export interface Entry {
   id: string; term: string; ipa_us: string; definition_en: string; meaning_zh: string;
   type: EntryType; pos: string; example: string; example_translation: string;
   usage: string; tags: string[]; source: string; notes: string;
   favorite: boolean; suspended: boolean; created_at: string; updated_at: string; revision: number;
+  word_forms?: WordForms;
 }
 export interface FSRSState {
   due: string; stability: number; difficulty: number; elapsed_days: number;
